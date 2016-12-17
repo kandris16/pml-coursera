@@ -1,0 +1,163 @@
+---
+title: "null"
+output:
+  html_document: 
+    fig_height: 5
+    fig_width: 7
+  pdf_document: default
+---
+```{r, message=FALSE,warning=FALSE,echo=FALSE}
+setwd("C:/Andris/R/datascience/8_practical machine learning/")
+library(caret)
+library(Hmisc)
+library(ggplot2)
+library(gridExtra)
+library(randomForest)
+library(rpart.plot)
+library(corrplot)
+library(parallel)
+library(doParallel)
+library(reshape2)
+library(data.table)
+```
+## Practical Machine Learning Course Project - Prediction Report
+
+#### Executive Summary  
+
+In this course project we need to predict the manner in which the participants did the exercise.
+In practice this means that we have to predict the "classe" variable in the test set based on a prediction model trained on the training set. The model can consist of any other variables in the database. 
+More information about the data and the project can be found on the website: http://groupware.les.inf.puc-rio.br/har 
+
+#### Data Loading and Exploratory Data Analysis  
+
+Data preparation includes retaining only the numerical variables and those ones which do not have missing observations.
+```{r,results='hide'}
+# data loading and database cleaning
+db=read.csv("pml-training.csv",sep = ",",dec = ".",na.strings = c(NA,"#DIV/0!"))
+testing=read.csv("pml-testing.csv",sep = ",",dec = ".",na.strings = c(NA,"#DIV/0!"))
+satDB=db[,-c(1:7)]
+testing=testing[,-c(1:7)]  # first seven variables are non-numerical and 
+
+cols=which(as.numeric(colSums(is.na(satDB)))==0) # variables without missing values selected
+satDB=satDB[,cols]
+testing=testing[,cols]
+```
+
+The next step is to create training and validation subsamples out of the original training sample.
+
+```{r, results='hide'}
+## create training and validation data set
+
+inTraining <- createDataPartition(satDB$classe, p = 0.75, list = FALSE)
+training <- satDB[inTraining,]
+validating  <- satDB[-inTraining,]
+```
+
+#### Exploratory Data Analysis  
+
+During our preliminary data analysis we make sure that the remaining variables can all contribute to explaining/predicting the 'classe' outcome. This is done by checking if they have sufficient variance with the nearZeroVar function of the caret package.
+```{r}
+nzv=nearZeroVar(training[,-53],saveMetrics=TRUE)
+sum(nzv[,3])# none of the remaining vars are close to being constants
+```
+We can check the correlation between the covariates. It seems there is co-movement mainly between those variables that are close to each other according to their meanings.
+```{r,echo=FALSE}
+corrplot(cor(training[,-53]),tl.cex = 0.5)
+```
+There are several variables in our database and some of them show high correlation so dimension reduction can be reasonal at some point of the analysis. 
+
+The next step in our exploratory data analysis is setting up a simple classification model in order to get a glimpse of the relative importance of our covariates. This is done with a basic classification tree model. First we fit the model:
+```{r,message=FALSE,results='hide'}
+set.seed(567)
+fitTree <- train(classe ~ ., data = training, 
+                 method = "rpart")
+```
+
+Then we obtain the variables which were the most important during the data splits of the classification tree model.
+
+```{r,results='hide'}
+vImp=varImp(fitTree)$importance
+significantVarIndex=which(vImp$Overall>=20) # the 20 value is arbitrary, I wanted to select only a small number of variables
+significantVarNames=rownames(vImp)[significantVarIndex]
+```
+```{r}
+significantVarNames
+```
+```{r,echo=FALSE}
+whch=match(significantVarNames,colnames(training))
+
+```
+
+To further  explore the characteristics of our covariates and their relationships with the 'classe' variable we can plot those 4 variables which were the most significant according to variable importance of the previous rpart fit.
+
+```{r,echo=FALSE}
+plot1=ggplot(training,aes(y=magnet_dumbbell_y,x=pitch_forearm,colour=classe))+geom_point()
+plot2=ggplot(training,aes(y=magnet_dumbbell_y,x=roll_belt,colour=classe))+geom_point()
+plot3=ggplot(training,aes(y=magnet_dumbbell_y,x=roll_dumbbell,colour=classe))+geom_point()
+plot4=ggplot(training,aes(y=pitch_forearm,x=roll_belt,colour=classe))+geom_point()
+plot5=ggplot(training,aes(y=pitch_forearm,x=roll_dumbbell,colour=classe))+geom_point()
+plot6=ggplot(training,aes(y=roll_belt,x=roll_dumbbell,colour=classe))+geom_point()
+grid.arrange(plot1,plot2,plot3,plot4,plot5,plot6,ncol = 3)
+```
+
+From these plots it is obvious that the connection is not linear between the covariates and the dependent variable. The covariates are not normally distributed and basically all of them have more than one modes.
+Therefore we decide to fit 3 types of model (K-Nearest Neighbour, Boosting with trees, Random Forest), all of which can grab nonlinear effects. Each of them will be fit on a reduced set of variables (the 2 types of dimension reduction: 1. with pca and 2. on a restricted set of variables based on the rpart model above).
+
+#### Fitting the prediction models
+
+```{r}
+#--------------------------------------------------------
+# K-Nearest Neighbour
+#--------------------------------------------------------
+fitKNN <- train(classe~., data=training, method = "knn", 
+                  preProcess = "pca",
+                  trControl = trainControl(preProcOptions = list(thresh=0.7)))
+
+fitKNN2 <- train(classe~., data=training[,c(whch,53)], method = "knn")
+```
+
+```{r}
+#--------------------------------------------------------
+# Boosting with trees
+#--------------------------------------------------------
+fitGBM <- train(classe ~ ., data = training, 
+               method = "gbm",
+               preProcess=c("pca"),
+               trControl = trainControl(preProcOptions = list(thresh=0.7)),
+               verbose = FALSE)
+
+fitGBM2 <- train(classe ~ ., data = training[,c(whch,53)], 
+                method = "gbm",
+                verbose = FALSE)
+```
+
+
+#### Predicting with the models on the validation set
+We created a validation set to assess the expected out-of-sample performance (accuracy) as requested in the excercise's description. In order to give a more accurate estimation of the out-of-sample accuracy, it is adviced to use cross validation, but due to lack of time and space we settled for normal validation here (sample is large enough to reasonably use normal validation).
+
+
+```{r}
+predKNN=predict(fitKNN,validating)
+cmKNN=confusionMatrix(predKNN,validating$classe)
+predGBM=predict(fitGBM,validating)
+cmGBM=confusionMatrix(predGBM,validating$classe)
+predKNN2=predict(fitKNN2,validating)
+cmKNN2=confusionMatrix(predKNN2,validating$classe)
+predGBM2=predict(fitGBM2,validating)
+cmGBM2=confusionMatrix(predGBM2,validating$classe)
+```
+
+```{r}
+c(KNN=cmKNN$overall[[1]],KNN2=cmKNN2$overall[[1]],
+  GBM=cmGBM$overall[[1]],GBM2=cmGBM2$overall[[1]])
+```
+
+#### Predicting with the best model on the test set
+
+```{r}
+predTest=predict(fitKNN,testing)
+#cmTest=confusionMatrix(predTest,testing$classe)
+predTest
+```
+
+
